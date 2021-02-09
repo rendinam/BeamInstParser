@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# Simple script to install the products of a BIParser run on the
+# core (BeamInstSupport) input definition file into the 
+# appropriate library directory tree.
+#
+# This assumes the output files are all generated in the
+# checked-out BeamInstParser directory and that this directory
+# lives at a level parallel to the BeamInstSupport directory.
+#------------------------------------------------------------------
+
+mv    *dump*     ../BeamInstSupport/commstruct_output
+mv -f *init*     ../BeamInstSupport/comm_code
+
+mv -f *config*   ../BeamInstSupport/comm_include
+mv -f *tags*     ../BeamInstSupport/comm_include
+mv -f *types*    ../BeamInstSupport/comm_include
+
+mv -f *commstru* ../BeamInstSupport/include
+
+mv -f *tables*   ../BeamInstSupport/instrument_code
+
+

@@ -1,0 +1,1300 @@
+#!/usr/bin/python
+#-*-python-*-
+#
+# CBPM Communication Structure Generator 5.0
+# (cbpm_comgen)
+#
+#    See the README file for user
+#    documentation.
+#--------------------------------------
+
+import os, sys, string, time
+from math import ceil
+from string import lower
+from string import upper
+from copy import deepcopy
+
+from boilerplate import *
+
+macros = {} # Dictionary to cache all the macro/value pairs found when searching include files.
+
+#---------------------------------------------------------------------------
+# Function to obtain the value of a named constant or macro in a C source
+# or header file.
+#  Accepts:
+#    The macro string to search for
+#    The directory where the files to search through live
+#---------------------------------------------------------------------------
+def find_macro_val( macro, dir_list ):
+
+    cmpline = "#define" + macro
+    
+    smashline = ""
+    ret_string = ""
+
+    for dir in dir_list:
+        if dir[-1] != '/':
+            dir = dir + "/"
+        for file in os.listdir(dir):
+            if os.path.isfile( dir + file ) and file.find('~') == -1:
+                f = open(dir + file, 'r')
+                for line in f.readlines():
+                    smashline = line.replace(' ','')
+                    smashline = smashline.replace('\t', '')
+                    smashline = smashline.strip()
+                    if smashline.find(cmpline) != -1:
+                        ret_string = line.split()[2]
+
+    if ret_string != "":
+        return ret_string
+    else:
+        return False
+
+
+
+
+#---------------------------------------------------------------------------
+# Returns True if the string argument is solely composed of digits
+# Returns False otherwise.
+#---------------------------------------------------------------------------
+def isint( str ):
+
+    digits = string.digits
+    
+    for char in str:
+        if char not in digits:
+            return False
+        
+    return True
+
+
+#---------------------------------------------------------------------------
+# Return arithmetic sum of elements of a macro string using the fetched
+# value of each each non-numeric macro token.
+#---------------------------------------------------------------------------
+def sub_macro_string( str, dirs ):
+
+    value = ""
+
+    tempstr = str.replace("*", " ")
+    tempstr = tempstr.replace("(", " ")
+    tempstr = tempstr.replace(")", " ")
+    tempstr = tempstr.replace("+", " ")
+
+    for token in tempstr.split():
+        token = token.strip("()+")
+        if not isint(token):
+            if token not in macros:  # If we haven't already encountered this macro, go find its value.
+                value = find_macro_val( token, dirs )
+                macros[token] = value
+            else:
+                value = macros[token]
+            if value != False:
+                str = str.replace( token, value )
+    return str
+
+
+#---------------------------------------------------------------------------
+# Class definition for Cmember custom class to hold information pertaining
+# to a C data structure member variable or array.
+#   Instances of this class are attached to each instance of the Cstruct
+#   class defined immediately below for every communication data structure
+#   needed.
+#---------------------------------------------------------------------------
+class Cmember:
+    "Class to hold descriptive info about structure member variables."
+    def __init__(self):
+        self.type        = ""  # Data type class
+        self.typename    = ""  # Specific data type name for custom types
+        self.name        = ""
+        self.data_count  = 0
+        self.ele_size    = 0
+        self.func_p_name = ""
+        self.dimensions  = 0   # The number of dimensions for an array.
+        self.format      = ""  # Formatting specifier or string to be used
+                               # in the automatically-genrated dump function
+                               # for the structure containing this variable.
+
+
+#---------------------------------------------------------------------------
+# Class definition for Cstruct custom class to hold information pertaining
+# to a C typedef data structure definition read in from the .def file.
+#   The default values for every parsed structure definition are set here.
+#   Nearly all of this information is what is required to populate the
+#   COMM_KEY_CONFIG structure that gets associated with each conventional
+#   structure.
+# 
+# The values of some of these map to an enumeration in some of the central
+# header files.
+#---------------------------------------------------------------------------
+class Cstruct:
+    "Class to hold contents and metainfo on a parsed C data structure definition"
+    def __init__(self):
+        self.shortname      = ''      # Name as found in .def file, BEFORE instrument type is prepended.
+        self.name           = ''      # Full name of the C structure (uppercase)
+        self.lname          = ''      # Lowercase version of self.name
+        self.name_on_inst   = ''      # The name of the structure as it will appear in code that runs on the instrument.
+        self.multiname      = ''
+        self.short_multiname = ''
+
+        self.ctl_tag        = ''      # unique ID for each struct the CTL side handles for all DSP exe types (was 0)
+        self.tagvalue       = 0       # Numerical value of the enumeration tag for the structure
+        self.flag_pairs     = {}      # Will hold any custom $$ flags and their values
+        self.dsp_tag        = 0       #X 1-127 (not in new h files, exists in CesrBPM cbpm_types.h) tags file takes care
+        self.exe_allowed    = 'GENERIC_EXE' #
+        self.protection     = 'CBI_CTL_READ_WRITE'    # CTL side can read/write/rw
+        self.record_type    = 'FIXED_REC_LENGTH'  # Fixed or variable length
+        self.num_pkts       = 0       #
+        self.num_vars       = 0       # Number of variables encapsulated in this struct
+
+        self.members        = []      # Collection of Cmember objects, each describing a member variable.
+        
+        self.chk_cpy_p_name = 'NULL'  # Name of the function pointer to be used for validity checks
+        self.io_func_p_name = 'cbi_struct_io' # Name of func ptr to be used for printing the contents of struct
+        self.multigroup_ID  = 0       # A unique ID number is assigned to each group of identical "multi" structures
+        self.multi_num      = 0       # Number of multiple instances to spawn for identical copies of the same data type.
+
+        self.totsize        = ''      # Space to hold symbolic total of C memory size of this structure
+                                      # possibly dependent on non-numeric symbols from #define directives.
+        self.segment_list   = ''      # Name of the list of memory segments to use when spawning instances
+                                      # of a C structure
+        self.segment_idx    = 0       # Index of segment_list that holds name of memory segment in which
+                                      # the struct shall live.
+        self.multiproc_space = 'YES'  # Flag to control whether or not the data structure will require
+                                      # access through a "multiprocessor space" memory offset when loading
+                                      # references into the Digital Board FPGA packet address table.
+                                      # All structures that reside in DSP internal memory require this.
+                                      # Structs that live in digital board SRAM do NOT.
+        self.code = [] # The lines of code used to define the structure.
+        # Is it helpful to accomodate the real memory size of the structure in addition to the 'symbolic'
+        # size currently stored as member 'totsize'?
+    #--- Class methods here -------------- 
+    def compute_symbolic_size(self):
+        total   = ""
+        idx     = 0
+        simptot = 0  # total of simple (value 1) datatype sizes, to be tallied numerically before export
+        plus    = ""
+        for var in self.members:
+            
+            if var.type == 'CBI_CHAR':
+                if int(var.data_count) % 4 != 0:
+                    sys.stderr.write('\n\nERROR: Length of character array ' + var.name + ' must be\n')
+                    sys.stderr.write('           and integer number of full (32-bit) words.\n')
+                    sys.exit(1)
+                    
+            if not isinstance(var.data_count, (int, float, long, complex)): # if not simple number
+                if var.ele_size == 1:
+                    total = total + plus + str(var.data_count)
+                else:
+                    total = total + plus + str(var.data_count) + ' * ' + str(var.ele_size)
+                plus = ' + '
+            else:
+                simptot = simptot + var.data_count
+                
+            idx = idx + 1
+        if simptot != 0 and total != "":
+            total = str(simptot) + ' + ' + total
+        elif simptot != 0:
+            total = str(simptot)
+        total = '(' + total + ')'
+        self.totsize = total
+
+
+    #-------------------------------------------
+    # Computes the optimal XBUS packet size and
+    # the number of XBUS packets necessary
+    # to transfer this data structure.
+    #-------------------------------------------
+    def compute_psize_pnum(self, dirs):
+        toeval      = sub_macro_string(self.totsize, dirs)
+        # Store the total size desription after macro substitution
+        self.totsize_exp = toeval
+        sys.stderr.write( "Struct: " + self.name + " To eval: " + toeval + '\n\n')
+        memsize     = eval(toeval)
+        pkt_size    = 256
+        wpkt_size   = 0
+
+        if (memsize >= pkt_size):
+            sizes = range(pkt_size, 1, -1)
+            for size in sizes:
+                if memsize % size == 0:
+                    wpkt_size = size
+                    break
+                if size == 2:
+                    sys.stderr.write("\n There is no packet size that allows for an integer number of packets \n")
+                    sys.stderr.write(" when transferring the structure   \"" + self.name + "\" _via_XBUS_.\n")
+                    sys.stderr.write(" Please adjust the structure members to ensure that the total structure \n")
+                    sys.stderr.write(" size is not a prime number of words and try parsing again.\n\n")
+                    sys.exit(1)
+        else:
+            wpkt_size = memsize
+
+        self.pkt_size = wpkt_size;
+        num_packets = (memsize/wpkt_size)
+        if num_packets == 0:
+            num_packets = 1
+        self.num_pkts = num_packets
+
+
+
+
+class Parser:
+  lines = []
+  collection_names = []
+  segment_collection = {}
+  memspec_open = False
+  
+  typefound = False
+  dirspec_open = False
+  include_dirs = []
+
+  inst_type = ""
+  inst_platform = ""
+
+  unflagged_structs = []
+  flagged_structs = []
+
+
+
+  def __init__(self, def_filename):
+      f = open(def_filename, 'r')
+      for line in f.readlines():
+          #if line.strip() != "":
+          self.lines.append( line[:-1] )
+      self.date = time.asctime()
+
+
+  def list_as_C_array(self, list):
+      string= str(list)
+      string = string.replace('(','').replace(')','').replace('[','').replace(']','').replace('\'','')
+      string = '{' + string + '}'
+      return string
+  
+
+  def process_header(self):
+
+      for line in self.lines:
+          if line[:2] == '!!':
+              chunks = line[2:].split()
+              #sys.stderr.write(str(line[2:].split())+'\n')
+              for chunk in chunks:
+                  pair = chunk.split(':')
+                  pair1 = str(pair[0])
+                  if pair[0] == "instrument_type":  # Save any hardware name found, must have one.
+                      if string.upper(pair[1]) == "ALL":
+                          self.inst_type = "CBI"
+                      else:
+                          self.inst_type = string.upper(pair[1])
+                      typefound  = True
+                  if pair[0] == "platform":
+                      platform = string.upper(pair[1])
+                  if pair[0] == "software":  # Save software name found or use default.
+                      software = string.upper(pair[1])
+                  if pair1.find("include_dirs") != -1 or self.dirspec_open:
+                      name = str(pair[0])
+                      if self.dirspec_open:
+                          name = name.strip(',')
+                          if '..' in name:
+                              name = os.getcwd() + '/' + name
+                          self.include_dirs.append(name)
+                          if line[-1:] != ",":
+                              self.dirspec_open = False
+                      else:
+                          print "Include directory list found"
+                          self.dirspec_open = True
+                  if pair1.find('segment') != -1 or self.memspec_open:
+                      # single <...>: value found, this is a memory segment collection
+                      name = str(pair[0])
+                      if self.memspec_open:
+                          name = name.strip(',')
+                          self.segment_collection[collec_name].append(name)
+                          if line[-1:] != ",":
+                              self.memspec_open = False
+                      else:
+                          print "Memory segment list specification found"
+                          collec_name = str(name)
+                          self.collection_names.append( collec_name )
+                          self.segment_collection[collec_name] = []
+                          self.memspec_open = True
+      if len(self.collection_names) != 0:
+          print ""
+          print "Memory segment collections specified"
+          print "------------------------------------"
+          #for collec_name in self.collection_names:
+              #print collec_name + ":"
+              #for segment in self.segment_collection[ collec_name ]:
+                  #sys.stdout.write(segment + "  ")
+          sys.stdout.write("\n\n")
+          print "NOTE: You must ensure that memory segments with the EXACT same names have"
+          print "      been defined properly in the instrument software's Linker Description File (LDF)"
+          print "      or equivalent.\n"
+
+      if not typefound:
+          print "No instrument type found.  Check the header of the .def file."
+          sys.exit(1)
+                          
+
+  def process_defs(self):
+      flagged_struct_open = False
+      unflagged_struct_open = False
+      
+      self.types_file = lower(self.inst_type) + '_types_a.h'
+      f = open(self.types_file, 'w')
+
+      num_multigroups = 0
+      
+      write_protection_settings = {"read":"CBI_CTL_READ_ONLY",
+                                   "write":"CBI_CTL_WRITE_ONLY",
+                                   "rw":"CBI_CTL_READ_WRITE" }
+
+      write_types_header_new(f, self.inst_type, self.date)
+      
+      for lnum, line in enumerate(self.lines):
+
+          sys.stdout.write( '[' + str(lnum+1) + '] ' + line + '\n')
+
+          if line[:2] != '$$' and line[:2] != '!!':
+              for struct in self.unflagged_structs:
+                  if line.find(';') >= 0 and line.find( upper(struct.shortname)) >= 0:
+                      line = line.replace( struct.shortname, struct.name )
+                      
+              if (line.find('}') != -1) and (line.find(';') != -1):
+                  f.write(line.strip().replace(' ', ' '+self.inst_type+'_'))
+              else:
+                  f.write(line+'\n')
+                  
+              # if line.strip()[:1] == '#':  # save directives to go to other output files?
+
+              if unflagged_struct_open == False and flagged_struct_open == False:
+                  if line.strip().replace(' ','') == 'typedefstruct{':
+                      unflagged_struct_open = True
+                      temp_members = []
+                      print "    +++opening UNFLAGGED structure"
+                      print "    >> " + line
+                      CSobj = Cstruct()
+                      CSobj.code.append(line)
+                      continue
+                 
+          elif line[:2] == '$$':
+              flagged_struct_open = True
+              multival = 1
+              pairl = []
+              flagpairs = line[2:]
+              temp_members = []
+              print "  +++opening FLAGGED structure"
+              CSobj = Cstruct()
+              for pairstr in flagpairs.split():
+                  pair = pairstr.split(':')
+                  if pair[0] == "check_ptr":
+                      CSobj.chk_cpy_p_name  = pair[1]
+                  if pair[0] == "io_ptr":
+                      CSobj.io_func_p_name  = pair[1]
+                  if pair[0] == "multi":
+                      multival              = int( pair[1] )
+                      CSobj.multi_num       = multival 
+                      sys.stderr.write(" MULTI = " + str(pair[1]) + "\n" )
+                  if pair[0] == "use_segments":
+                      CSobj.segment_list    = pair[1]
+                  if pair[0] == "mp_space":
+                      CSobj.multiproc_space = pair[1]
+                  if pair[0] == "rec_len":
+                      if lower(pair[1]) == "var":
+                          CSobj.record_type = "VAR_REC_LENGTH"
+                  if pair[0] == "protection":
+                      CSobj.protection      = write_protection_settings[ pair[1] ]
+                  CSobj.flag_pairs[ pair[0] ] = pair[1] # save flags in OBJ
+              continue  # Done processing this line
+
+          if flagged_struct_open and line.strip()[:2] != '//':
+              print "    >f> " + line
+              CSobj.code.append(line)
+
+          if unflagged_struct_open and line.strip()[:2] != '//':
+              print "    >u> " + line
+              CSobj.code.append(line)
+
+          if unflagged_struct_open or flagged_struct_open:
+              if line.find('}') != -1 and line.find(';') != -1:
+                  if unflagged_struct_open:
+                      CSobj.shortname = line.strip('};').strip()
+                      CSobj.name = self.inst_type + '_' + line.strip('};').strip()
+                      sys.stderr.write("    NAME --- " + CSobj.name + '\n')
+                      CSobj.members = temp_members
+                      self.unflagged_structs.append(CSobj)
+                      print "    ---closing UNFLAGGED structure\n\n"
+                      unflagged_struct_open = False
+                   
+                  if flagged_struct_open:
+                      if multival > 1:
+                          num_multigroups = num_multigroups + 1; # Bump multigroup ID value
+                          for mult_idx in range( 0, multival ):
+                              CSobj.multigroup_ID = num_multigroups
+                              CSobj.shortname = line.strip('};').strip()
+                              CSobj.name = self.inst_type + '_' + line.strip('};').strip()
+                              CSobj.multiname = self.inst_type + '_' + line.strip('};').strip() + str(mult_idx)
+                              CSobj.short_multiname = line.strip('};').strip() + str(mult_idx)
+                              CSobj.name_on_inst = "INST_" + lower(CSobj.shortname) + str(mult_idx)
+                              CSobj.ctl_tag     = CSobj.name + str(mult_idx) +"_TAG"
+                              CSobj.segment_idx = mult_idx
+                              CSobj.members = temp_members
+                              self.flagged_structs.append( deepcopy(CSobj) )
+                      else:
+                          CSobj.shortname = line.strip('};').strip()
+                          CSobj.name       = self.inst_type + '_' + line.strip('};').strip()
+                          CSobj.ctl_tag    = CSobj.name + "_TAG"
+                          CSobj.members = temp_members
+                          self.flagged_structs.append( deepcopy(CSobj) )
+
+                      print "    ---closing FLAGGED structure\n\n"
+                      flagged_struct_open = False
+
+                  del CSobj
+                  f.write('\n\n')
+                  continue
+
+              # Store variable's name from the current line
+              templine = line.strip()
+              vname = templine[templine.find(' ')+1:templine.find(';')]
+              vname = vname.strip()
+
+              # If struct member is an array, replace each dimension with '[0]'
+              # so names are correct for pointer set up in the INIT file later on.
+              dim = vname.count('[')
+              if dim > 0:
+                  vname = vname[:vname.find('[')]
+              for i in range( 0, dim ):
+                  vname = vname + '[0]'
+
+              # Recognize Variable types and tally them up as they're encountered
+              Cmemobj = Cmember()
+              Cmemobj.name = vname
+              if vname == 'struct':
+                  # Ignore typedef line of structure definition
+                  continue
+              
+              # TODO: Add 'char' support here.
+              if line.strip()[:3] == 'int':
+                  Cmemobj.ele_size = 1
+                  Cmemobj.func_p_name = 'cbi_int_convert'
+                  Cmemobj.type = 'CBI_INT'
+              elif line.strip()[:5] == 'float':
+                  Cmemobj.ele_size = 1
+                  Cmemobj.func_p_name = 'cbi_float_convert'
+                  Cmemobj.type = 'CBI_FLOAT'
+              elif line.strip()[:4] == 'char':
+                  Cmemobj.ele_size = 0.25
+                  Cmemobj.func_p_name = 'cbi_int_convert'
+                  Cmemobj.type = 'CBI_CHAR'
+              else:
+                  for struct in self.unflagged_structs:
+                      if line.split()[0].strip() == struct.name:
+                          sys.stderr.write("                          CBI_STRUCT encountered : " +
+                                           struct.name + "\n" )
+                          Cmemobj.type = "CBI_STRUCT"
+                          Cmemobj.typename = struct.name
+                          Cmemobj.func_p_name = lower(struct.name) + '_convert'
+                          # Get size of the complex type this member requires
+                          struct.compute_symbolic_size()
+                          Cmemobj.ele_size = struct.totsize
+                          
+              if line.find('[') != -1 and line.find(']') != -1:   # Found a (possibly multidimensional) array of vars
+                  sname = line[ line.find('[')+1 : line.find(';') ]
+                  sname = sname.replace(' ', '')
+                  if sname.find('+') >= 0 or sname.find('-') >= 0 or sname.find('*') >= 0:
+                      sname = '(' + sname.replace('][',')*(').replace(']','') + ')'
+                  else:
+                    sname = sname.replace('][','*').replace(']','')
+                  Cmemobj.data_count = sname
+              elif line.find(';') != -1:
+                  Cmemobj.data_count = 1
+
+              # Check for any special formatting keywords for the variable being parsed
+              # to be used when composing the dump function for this structure.
+              if line.find('format') >= 0:
+                  Cmemobj.format = line.split('format(')[1].split(')')[0]
+              else:
+                  Cmemobj.format = Cmemobj.type.replace('CBI_', '')
+
+
+              temp_members.append( deepcopy(Cmemobj) )
+              del Cmemobj  # Get rid of temporary working copy of the object
+
+
+      # Write out the 'DATA' final aggregation structure
+      f.write("typedef struct {\n")
+      for struct in self.flagged_structs:
+          if struct.multigroup_ID == 0:
+              tempname = lower(struct.name)
+          else:
+              tempname = lower(struct.multiname)
+          if struct.multi_num == 0:
+              # Compose name-on-instrument field here for all non-multi structs.
+              # They get their names assigned above where it's more convenient.
+              struct.name_on_inst = "INST_" + lower(struct.shortname)
+              f.write("      "+ struct.name.ljust(32) + tempname + ";\n")
+          else:
+              f.write("      "+ struct.name.ljust(32) + tempname + ";\n")
+      f.write("} " + self.inst_type + "_DATA;\n")
+      write_types_footer_new(f)
+      f.write('\n')
+      f.close()
+      
+
+  # Examine every element of every structure and extract named constants.
+  # Look up their values, and compose a collection of strings to insert
+  # in the python3 file generated later.  This will give access to
+  # key named constants required for array dimensions and loop limits
+  # in python code.
+  # def
+
+  def calculate_structure_values(self):
+      for struct in self.flagged_structs:
+          struct.compute_symbolic_size()
+          struct.num_vars = len(struct.members)
+          struct.compute_psize_pnum(self.include_dirs)
+          struct.typename = struct.name
+          print ' Fstruct typename = ' + struct.typename
+          struct.lname = lower(struct.name)
+          for member in struct.members:
+              if isinstance(member.data_count, str):
+                  member.dimensions = string.count(member.data_count, "*") + 1
+
+      for struct in self.unflagged_structs:
+          struct.ctl_tag = struct.shortname + '_' + self.inst_type + '_TAG'
+          struct.num_vars = len(struct.members)
+          struct.typename = struct.name
+          print ' Ustruct typename = ' + struct.typename
+          struct.lname = lower(struct.name)
+          for member in struct.members:
+              if isinstance(member.data_count, str):
+                  member.dimensions = string.count(member.data_count, "*") + 1
+          
+
+  def struct_code(self):
+      print "-------------------------------"
+      print "Flagged structures"
+      print "-------------------------------"
+      for struct in self.flagged_structs:
+          print "\n   ---"+struct.name+"---"
+          for line in struct.code:
+              print line
+
+      print "\n"
+
+      print '-------------------------------'
+      print 'UN-Flagged structures'
+      print '-------------------------------'
+      for struct in self.unflagged_structs:
+          print '\n   ---'+struct.name+'---'
+          for line in struct.code:
+              print line
+
+
+  def write_config_file(self):
+      self.config_file = lower(self.inst_type) + '_config_a.h'
+      f = open(self.config_file, 'w')
+
+      write_config_header_new(f, self.inst_type, self.date)
+
+      col = 43
+      for struct in self.flagged_structs:
+          # extract only the types from the nested list struct.data_type
+          types        = []
+          data_counts  = []
+          ele_sizes    = []
+          func_p_names = []
+          if struct.multigroup_ID == 0:
+              tempname = struct.name
+          else:
+              tempname = struct.multiname
+          
+          for var in struct.members:
+              types.append( var.type )
+              data_counts.append( var.data_count )
+              func_p_names.append( var.func_p_name )
+              ele_sizes.append( var.ele_size )
+          f.write('#if defined(' + self.inst_type + '_NO_EXTERN)\n')
+          f.write('      static const COMM_KEY_CONFIG ' + lower(tempname) + '_cfg = {\n')
+          f.write('         "' + (lower(tempname) + '",').ljust(col) + '// name\n')
+          f.write('         ' + (struct.ctl_tag + ',').ljust(col) + ' // struct_tag\n')
+          f.write('         ' + ('1,').ljust(col) + ' // exe_type_allowed\n')
+          f.write('         ' + (str(struct.pkt_size)+',').ljust(col) + ' // pkt_size\n')
+          f.write('         ' + (str(struct.num_pkts)+',').ljust(col) + ' // num_pkts\n')
+          f.write('         ' + (str(struct.num_vars)+',').ljust(col) + ' // num_vars\n')
+          f.write('         ' + (struct.protection+',').ljust(col) + ' // protection\n')
+          f.write('         ' + (struct.record_type+',').ljust(col) + ' // rec length flag\n')
+          f.write('         ' + (self.list_as_C_array(types)+',').ljust(col) + ' // data types\n')
+          f.write('         ' + (self.list_as_C_array(data_counts)+',').ljust(col) + ' // data counts\n')
+          f.write('         ' + (self.list_as_C_array(ele_sizes)+',').ljust(col) + ' // element sizes\n')
+          f.write('         ' + (self.list_as_C_array(func_p_names)+',').ljust(col) + ' // conv func ptrs\n')
+          f.write('         ' + (struct.chk_cpy_p_name+',').ljust(col) + ' // custom copy/check function\n')
+          f.write('         ' + (struct.io_func_p_name).ljust(col) + ' // IO function\n')
+          f.write('      };\n')
+          f.write('#else\n')
+          f.write('      extern const COMM_KEY_CONFIG ' + lower(tempname) + '_cfg;\n')
+          f.write('#endif\n\n\n')
+      write_config_footer_new(f)
+      os.chmod(self.config_file, 0444) # Make file read-only
+      f.close()
+      sys.stderr.write('Wrote ' + self.config_file + '\n')
+
+
+  def write_tags_file(self):
+      """MUST be run to generate appropriate tag (address table offset)
+      values for python3 code generation defined in a member method
+      below."""
+      self.tags_file = lower(self.inst_type) + '_tags_a.h'
+      f = open(self.tags_file, 'w')
+
+      write_tags_header_new(f, self.inst_type, self.date)
+      
+      f.write('enum ' + self.inst_type + '_TAG_ENUM {\n')
+      numstructs = len(self.flagged_structs)
+
+      if self.inst_type == 'CBI':
+          f.write('  CBI_ILLEGAL_TAG,\n')
+      else:
+          macval = find_macro_val('TOT_CBI_COMM_STRUCTS', self.include_dirs)
+          if macval == False:
+              print 'ERROR getting value of macro TOT_CBI_COMM_STRUCTS\n'
+              print 'Check that the include directory where this constant is defined\n'
+              print 'is mentioned in the header of the input .def file.'
+              sys.exit(1)
+          secondary_enum_start_value = int(macval)+1
+
+      first_struct = True
+      for count, struct in enumerate(self.flagged_structs):
+          if self.inst_type == 'CBI':
+              struct.tagvalue = count+1             
+              f.write('  ' + struct.ctl_tag + ',\n')
+          else:
+              struct.tagvalue = secondary_enum_start_value + count
+              if first_struct:
+                  f.write('  ' + str(struct.ctl_tag) + ' = CBI_FIRST_LOCAL_TAG,\n')
+                  first_struct = False
+              else:
+                  f.write('  ' + str(struct.ctl_tag) + ',\n')
+
+      if self.inst_type == 'CBI':
+          f.write('  CBI_FIRST_LOCAL_TAG\n')
+      else:
+          f.write('  ' + ('FINAL_INVALID_' + self.inst_type + '_TAG').ljust(32) + '\n')
+
+      f.write('};\n\n')
+      f.write('//------------------------------------------------------\n')
+      f.write('// Define the total number of platform-specific\n')
+      f.write('// communication structures\n')
+      f.write('//------------------------------------------------------\n')
+      f.write('#define TOT_' + self.inst_type + '_COMM_STRUCTS          ' + str(numstructs) + '\n')
+      f.write('\n\n\n')
+      f.write('#endif\n')
+
+
+
+
+  def write_init_file(self):
+      self.init_file = lower(self.inst_type) + '_init_a.c'
+      f = open(self.init_file, 'w')
+
+      write_init_header_new(f, self.inst_type, self.date)
+
+      f.write('\n\n\n')
+      f.write('int ' + lower(self.inst_type) + '_init_a(CBI_CTL_MODULE *p_ctl_mod) {\n')
+      f.write('  int i, first_tag, num_tags, tag;\n')
+      f.write('  COMM_KEY *p_key;\n\n')
+      f.write('  CBI_DATA* p_core;\n')
+      f.write('  p_core=p_ctl_mod->core;\n')
+      if self.inst_type == 'CBI':
+          f.write('  CBI_DETECTOR detector_init;\n')
+          f.write('  p_ctl_mod->active     = CBI_INACTIVE;\n')
+          f.write('  p_ctl_mod->db_update  = CBI_DONT_UPDATE;\n\n')
+          f.write('  //Initialize p_ctl_mod->mod\n')
+          f.write('  //Initialize p_ctl_mod->det\n')
+          f.write('  p_ctl_mod->det = detector_init;\n\n')
+          f.write('  //Initialize p_ctl_mod->dsp_data\n')
+          f.write('  p_ctl_mod->dsp_data = NULL;\n\n')
+          f.write('  //Initialize p_ctl_mod->analysis\n')
+          f.write('  p_ctl_mod->analysis = NULL;\n')
+          f.write('  p_ctl_mod->n_keys = 0;\n\n\n')
+      else:
+          f.write('  ' + self.inst_type + '_DATA  data;\n')
+          f.write('  '+ self.inst_type + '_DATA* p_data;\n')
+          f.write('  p_data=(' + self.inst_type + '_DATA*)(p_ctl_mod->dsp_data);\n\n\n')
+
+      for struct in self.flagged_structs:
+          if struct.multigroup_ID == 0:
+              tempname = lower(struct.name)
+          else:
+              tempname = lower(struct.multiname)
+          f.write('//---Initializations for ' + tempname + '\n')
+          f.write('  p_key = &(p_ctl_mod->key[p_ctl_mod->n_keys]);\n')
+          f.write('  // configuration\n')
+          f.write('  p_key->p_config      = &(' + tempname + '_cfg);\n')
+          f.write('  //data pointers\n')
+          for array_idx, var in enumerate(struct.members):
+              if self.inst_type == 'CBI':
+                  f.write('  p_key->data.ptr[' + str(array_idx).rjust(2) +
+                          ']  = (void *)(&(p_core->' +
+                          tempname + '.' + var.name + '));\n')
+              else:
+                  f.write('  p_key->data.ptr[' + str(array_idx).rjust(2) +
+                          ']  = (void *)(&(p_data->' +
+                          tempname +'.'+ var.name + '));\n')
+                
+          f.write(BP_Dict['BP_tag2key'] + '\n')
+      f.write('  return F_SUCCESS;\n')
+      f.write('}\n')
+ 
+
+  def write_multistruct_accessor(self):
+      last_multigroup_ID_seen = 0
+
+      for struct in self.flagged_structs:
+          name  = struct.name
+          if (last_multigroup_ID_seen != struct.multigroup_ID) and struct.multigroup_ID > 0:
+              last_multigroup_ID_seen = struct.multigroup_ID
+              num_multi_structs = struct.multi_num
+              accessor_file = struct.lname + '_get_a.c'
+              f = open( accessor_file, 'w')
+              f.write('//------------------------------------------------------------------------\n')
+              f.write('//  D O     N O T     E D I T     T H I S     F I L E \n')
+              f.write('//------------------------------------------------------------------------\n')
+              f.write('// File         :  ' + accessor_file + '\n')
+              f.write('// Date Created :  ' + self.date + '\n')
+              f.write('//\n')
+              f.write('// Description  :  This file was automatically generated by the BIParser.\n')
+              f.write('//                 It provides a standardized accessor function to allow\n')
+              f.write('//                 retrieval of data values from a collection of identical\n')
+              f.write('//                 data buffer structures, indexed in a \n')
+              f.write('//                 <card, timing_block, channel> fashion.\n')
+              f.write('//------------------------------------------------------------------------\n')
+              f.write('#include "' + lower(self.inst_type) + '_includes.h"\n\n')
+              f.write('int '+struct.lname+'_get('+ self.inst_type +
+                      '_DATA *dp, int card, int tblock, int idx) { \n\n')
+              f.write('int buf_number = (card*' + self.inst_type + '_MAX_TIMING_BLOCKS*' + self.inst_type +
+                      '_MAX_CARD_ADCS_PER_BLOCK) +\n')
+              f.write('                 (tblock*' + self.inst_type + '_MAX_CARD_ADCS_PER_BLOCK);\n')
+              f.write('int *ptr;\n\n')
+              f.write('switch (buf_number) {\n')
+              for mstruct_idx in range(0, num_multi_structs):
+                  f.write('case (' + str(mstruct_idx) + '):\n')
+                  f.write('  ptr = (int*)&(dp->' + struct.lname + str(mstruct_idx) + ');\n')
+                  f.write('  return *(ptr+idx);\n')
+                  f.write('  break;\n')
+              f.write('  default:\n')
+              f.write('      break;\n')
+              f.write('  }\n')
+              f.write('  return CBI_F_SUCCESS;\n')
+              f.write('}\n')
+
+              os.chmod(accessor_file, 0444 ) # Make file read-only
+              sys.stderr.write("Wrote multi-buffer accessor file : " + accessor_file + "\n")
+
+
+  #------------------------------
+  #------------------------------
+  def write_declarations(self):
+      indent = '   '
+      spcs   = '         '
+      ext    = ['','extern ']
+      vols   = [spcs, 'volatile ']
+
+      self.commstructs_file = lower(self.inst_type) + "_commstructs_a.h"
+      f = open(self.commstructs_file, 'w')
+
+      write_INST_struct_decs_header_new(f, self.inst_type, self.date)
+
+      # Temporary workaround warning written to header file.
+      f.write('//------------------------------------------------------------------------\n')
+      f.write('// "#pragma align _LONG" instances below are for work-around of\n')
+      f.write('// digital board FPGA bug (c. 9-Oct-2009) affecting CBInet structure\n')
+      f.write('// transfers when structures happen to fall near a particular type of\n')
+      f.write('// address rollover boundary.\n')
+      f.write('//------------------------------------------------------------------------\n')
+      for ppass in range(0,2):
+          for struct in self.flagged_structs:
+              vol = 0
+              seg = ''
+              f.write(indent)
+              if struct.protection == 'CBI_CTL_READ_WRITE':
+                  vol = 1
+              if struct.segment_list != '':
+                  seg = "segment(\"" + self.segment_collection[struct.segment_list][struct.segment_idx] + "\") "
+              # This pragma is a workaround for structure read bug found in digital board FPGA c.9-Oct-2009
+              # Only done on first (non extern declaration) pass of this loop.
+              elif ppass == 0: 
+                  f.write('#pragma align _LONG\n')
+            
+              f.write(vols[vol] + ext[ppass] + struct.name.ljust(32) + seg + struct.name_on_inst + ';\n')
+                
+          if ppass == 0:
+              f.write('\n\n#else\n')
+              
+      write_INST_struct_decs_footer_new(f)
+      os.chmod(self.commstructs_file, 0444 ) # Make file read-only
+      sys.stderr.write("Wrote " + self.commstructs_file + "\n")
+
+
+  #------------------------------
+  #------------------------------
+  def write_packet_tables(self):
+      # Get value of MX_PKT_SIZE needed for calculations below
+      pkt_macro = 'CBI_MAX_PKT_DATA'
+      pkt_size = int(find_macro_val( pkt_macro, self.include_dirs ))
+
+      self.ptables_file = lower(self.inst_type) + '_pkt_tables_a.c'
+      f = open(self.ptables_file, 'w')
+
+      write_INST_packet_tables_header_new(f, self.inst_type, self.date)
+
+      f.write('//==================================================================================\n')
+      f.write('// Memory usage for communication data structures:\n')
+      f.write('//\n')
+      f.write('// Structure           Element tally'.ljust(65) + 'Mem (words)  # X-Pkts \n')
+      f.write('//==================================================================================\n')
+
+      memtot = 0;
+      for struct in self.flagged_structs:
+          if struct.multigroup_ID == 0:
+              tempname = lower(struct.name)
+          else:
+              tempname = lower(struct.multiname)
+          simpidx     = struct.name.find(self.inst_type)
+          if simpidx == -1:
+              simplename = struct.name.replace("CBI_", "")
+          else:
+              simplename  = struct.name[:simpidx-1]
+          memsize = eval(struct.totsize_exp)
+          num_pkts = str(struct.num_pkts)
+          memtot = memtot + memsize
+
+          f.write('// ' + (tempname).ljust(20) +': '
+                  + struct.totsize_exp.ljust(45) + ' = '
+                  + str(memsize).ljust(7) + num_pkts + '\n')
+        
+      f.write('//                                                           -----------------------\n')
+      f.write('//                                                            TOTAL : ' + str(memtot) + '\n')
+      f.write('//==================================================================================\n\n\n')
+
+      if self.inst_type == 'CBI':
+          f.write('int init_core_packet_tables() {\n')
+      else:
+          f.write('int init_packet_tables() {\n')
+
+      f.write('   //-------------------------------------------------------+\n')
+      f.write('   // Packet address table initialization                   |\n')
+      f.write('   //-------------------------------------------------------+\n')
+
+
+      for struct in self.flagged_structs:
+          simpidx = struct.name.find(self.inst_type)
+          if struct.multiproc_space == 'YES':
+              mps_offset = ' + CBI_MPS_OFFSET;'
+          else:
+              mps_offset = ';'
+          if simpidx == -1:
+              simplename = struct.name.replace('CBI_', '')
+          else:
+              simplename  = struct.name[:simpidx-1]
+          f.write(('   *(p_pkt_adr_table + ' + struct.ctl_tag + ')').ljust(56) + '= (int)&' +
+                  (struct.name_on_inst).ljust(19) + mps_offset + '\n')
+        
+
+      f.write('   //-------------------------------------------------------+\n')
+      f.write('   // Packet size table initialization                      |\n')
+      f.write('   //-------------------------------------------------------+\n')
+      
+      for struct in self.flagged_structs:
+          simpidx = struct.name.find(self.inst_type)
+          if simpidx == -1:
+              simplename = struct.name.replace('CBI_', '')
+          else:
+              simplename  = struct.name[:simpidx-1]
+          if struct.num_pkts == 1:
+              f.write(('   *(p_pkt_siz_table + ' + struct.ctl_tag + ')').ljust(56) +
+                      '= sizeof(' + (struct.name_on_inst + ');').ljust(19) + '\n')
+          else:
+              f.write(('   *(p_pkt_siz_table + ' + struct.ctl_tag + ')').ljust(56) +
+                      '= '+ str(struct.pkt_size)  + ';\n')
+
+      f.write('\n  return CBI_F_SUCCESS;\n')
+      f.write('}\n')
+      os.chmod(self.ptables_file, 0444 ) # Make file read-only
+      sys.stderr.write("Wrote " + self.ptables_file + "\n")
+
+
+
+  #------------------------------
+  #------------------------------
+  def write_dump_routines(self):
+      print "Flagstructs:"
+      for struct in self.flagged_structs:
+          print struct.name
+          print 'Total size = ' + struct.totsize
+          for member in struct.members:
+              print "  name: " + member.name
+              print "    type:    " + member.type
+              print "    count:   " + str(member.data_count)
+              print "    el_size: " + str(member.ele_size)
+              print "    format:  " + member.format
+          print "\n\n"
+
+
+      print "\n\n\n\nUNFLAGGED structsts:\n"
+      for struct in self.unflagged_structs:
+          print struct.name
+          print 'Total size = ' + struct.totsize
+          for member in struct.members:
+              print "  name: " + member.name
+              print "    type:    " + member.type
+              print "    count:   " + str(member.data_count)
+              print "    el_size: " + str(member.ele_size)
+              print "    format:  " + member.format
+          print "\n\n"      
+
+      # Sensible default formatting strings to use for
+      # plain old integers, floats, and hex-formatted values.
+      # These may be overridden for a given variable's dump function
+      # by adding apropriate keywords on that variable's line in the
+      # input .def file.
+      formats = {"INT"      : "%d  ",
+                 "FLOAT"    : "%f  ",
+                 "HEX"      : "0x%x  ",
+                 "BITFIELD" : ""         }
+
+      # Loop and subloop variable names for auto-gemerated dump loops.
+      loopvars = {1:"v",
+                  2:"sv"}
+
+      # Dictionary of whitespace chunks for improving readability of generated code.
+      indents = {1:"",
+                 2:"  "}
+
+
+      def spaces( num ):
+          string = ""
+          for space in range(0,num):
+              string = string + "  "
+          return string
+
+
+      #-----------------------------------------------------------------
+      # Generate dump code for a single variable member of a structure.
+      #-----------------------------------------------------------------
+      def generate_variable_dump( structname, var, f ):
+
+          struct_ptrs = ["CTL_System.p_Module[iidx]->core->",
+                         "dp->"                               ]
+
+          if self.inst_type == 'CBI':
+              ptype = 0
+          else:
+              ptype = 1
+    
+          # Note how deep into the recursion this is.
+          # The recursion level determines some output formatting later.
+          tier = structname.count(".") + 1
+
+          clean_varname = var.name.strip("[0]")
+
+          # Determine whether to use a default, specialty, or fully custom formatting string
+          # for displaying the variable's contents during a dump function call.
+          try:
+              format = formats[ var.format ]
+          except KeyError:
+              format = var.format
+
+
+          # Print the output statement for a single-variable structure member.
+          if var.dimensions == 0:
+              if isinstance(format, str):
+                  f.write(indents[tier] + "  fprintf(fp, \"" + var.name + \
+                          ": " + format + "\\n\", " + struct_ptrs[ptype] + \
+                          structname + "." + var.name + ");\n")
+          else:
+              # Structure member is an array of some dimensionality, thus
+              # requiring loops to present in full.
+              # Loop opening
+              f.write("  " + indents[tier] + "fprintf(fp, \"" + \
+                      clean_varname + ":\\n\");\n")
+              for dim in range(0, var.dimensions):
+                  dimvar = loopvars[tier] + str(dim)
+                  dimsize = var.data_count.split("*")[dim]
+                  f.write(indents[tier] + spaces(dim) + "  for ("+ dimvar + \
+                          " = 0; " + dimvar + " < " + dimsize + \
+                          "; " + dimvar + "++) {\n")
+
+              # Structure member is another structure, not a simple type.
+              # Recursively process this.
+              if var.type == "CBI_STRUCT":
+                  print '      Structure type found'
+                  f.write('\n\n')
+                  # Lookup the substruct name in the unflagged struct list
+                  print 'Attempting to match : ' + var.typename
+                  for struct in self.unflagged_structs:
+                      print '  ' + struct.typename
+                      if struct.typename == var.typename:
+                          print ' Typename match!'
+                          for subvar in struct.members:
+                              prev_tier_vars = string.count(var.name, "[0]")
+                              for tier_var in range(0, prev_tier_vars):
+                                  looped_varname = string.replace( var.name,
+                                                                   "[0]",
+                                                                   "["+loopvars[tier]+str(tier_var)+"]",
+                                                                   1 )
+                              generate_variable_dump( structname+"."+looped_varname, subvar, f )
+                  print '\n'
+                  
+              # Structure member is an array of some dimensionality of simple types.
+              else:
+                  f.write(indents[tier] + spaces(dim) + "    fprintf(fp, \"" + format + "\", " +
+                          struct_ptrs[ptype] + structname + "." + clean_varname)
+                  for dim in range(0, var.dimensions):
+                      f.write("[" + loopvars[tier] + str(dim) + "]")
+                  f.write(' );\n')
+
+
+              # Loop closing
+              for dim in range(0, var.dimensions):
+                  f.write(indents[tier] + \
+                          spaces(var.dimensions - dim) + \
+                          '}\n')
+                  f.write(indents[tier] + \
+                          spaces(var.dimensions - dim) + \
+                          'fprintf(fp, \"\\n\");\n')
+
+      #-----------------------------------------------------------------------------
+      # Generate a standardized dump function for each communication data
+      # structure.  These functions can be called at any time in the control code
+      # to print a human-readable set of value tables for every element in
+      # every structure and substructure as necessary in all communication
+      # data strctures created by the parser's action.
+      #-----------------------------------------------------------------------------
+      print 'Generating structure dump functions...'
+      for struct in self.flagged_structs:
+
+          if struct.multigroup_ID == 0:
+              tempname = lower(struct.name)
+          else:
+              tempname = lower(struct.multiname)
+              
+          funcname   = tempname.replace( lower(self.inst_type), lower(self.inst_type+'_dump'))
+
+          filename = funcname + "_a.c"
+          print '\n\n' + filename
+          f = open( filename, 'w')
+          
+          write_dump_header_new(f, filename, self.date)
+
+          include_line = "#include \"" + lower(self.inst_type)
+          if self.inst_type == 'CBI':
+              include_line = include_line + "_core"
+          include_line = include_line + "_includes.h\"\n"
+          f.write(include_line + '\n')
+
+
+          f.write('int ' + funcname + '( FILE *fp, int iidx ) {\n\n')
+          var = 0
+          if self.inst_type != 'CBI':
+              f.write('  ' + self.inst_type + '_DATA *dp;\n')
+              f.write('  dp = CTL_System.p_Module[iidx]->dsp_data;\n\n')
+          f.write('  fprintf(fp, \" Communication Structure Dump for: ' + tempname + '\\n");\n')
+          f.write('  int  v0,  v1,  v2,  v3,  v4,  v5,  v6;\n')
+          f.write('  int sv0, sv1, sv2, sv3, sv4, sv5, sv6;\n')
+          f.write('\n')
+          for var in struct.members:
+              generate_variable_dump( tempname, var, f )
+
+          f.write('\n  return CBI_F_SUCCESS;\n\n')
+
+          f.write('}\n')
+          f.write('\n\n')
+          
+          #print 'Wrote ' + filename + '\n'
+          f.close()
+
+
+  #------------------------------
+  #------------------------------
+  #def finalize_protos_file(self):
+      
+
+
+  #------------------------------
+  #------------------------------
+  def write_python3_file(self):
+      self.py3_file = lower(self.inst_type) + '.py'
+      f = open(self.py3_file, 'w')
+
+      const_tokens = []
+
+      def extract_constants(struct, tokens):
+          sizetokens = struct.totsize.replace('(',' ').replace(')',' ')
+          sizetokens = sizetokens.replace('+',' ').replace('*',' ')
+          # Compose list of unique named constant tokens for this file.
+          # The exception try clause it to filter out numerical size
+          # parameters in arrays and such that do not appear as named
+          # constants in any header files.
+          for token in sizetokens.split():
+               try:
+                   int(token[0])
+               except ValueError:  # Token is not an integer.
+                   if token not in tokens:
+                       tokens.append(token)
+
+      
+
+      def write_struct_code(struct, flagged):
+          spacer = '                '
+          if struct.multi_num != 0:
+              name = struct.short_multiname
+          else:
+              name = struct.shortname
+          f.write('class '+name+'(communication_struct):\n')
+          f.write('    _fields_ = [')
+          first_member = True
+          for count, member in enumerate(struct.members):
+              if first_member:
+                  indent = ''
+              else:
+                  indent = spacer
+              if member.type == 'CBI_INT':
+                  type = 'c_int'
+              if member.type == 'CBI_FLOAT':
+                  type = 'c_float'
+              if member.type == 'CBI_CHAR':
+                  type = 'c_char'
+              if member.type == 'CBI_STRUCT':
+                  type = member.typename.replace(self.inst_type+'_', '')
+              name = member.name.replace('[0]', '')
+              f.write(indent+'(\''+name+'\', ')
+              if not isinstance(member.data_count, int):
+                  for dim in range(0, member.dimensions-1):
+                      f.write('(')
+                  f.write(type)
+                  data_counts_list = member.data_count.replace('*',' ').split()
+                  data_counts_list.reverse()
+                  for item in data_counts_list:
+                      f.write('*'+item+')')
+              else:
+                  f.write(type+')')
+                  
+              if count == len(struct.members)-1:
+                  f.write(']\n')
+              else:
+                  f.write(',\n')
+              first_member = False
+          f.write('\n')
+          
+          if flagged:
+              f.write('    def __init__(self, socketfd):\n')
+              f.write('        self.table_offset = '+str(struct.tagvalue)+'\n')
+              f.write('        communication_struct.__init__(self, socketfd)\n\n\n')
+
+
+      f.write('#----------------------------------------------\n')
+      f.write('# Automatically generated python3 module code\n')
+      f.write('# for core communication data structures.\n')
+      f.write('#----------------------------------------------\n\n')
+      if self.inst_type == 'CBI':
+          f.write('from cbi_core import *\n\n')
+      else:
+          f.write('from cbi import *\n\n')
+
+
+      for struct in self.unflagged_structs:
+          extract_constants(struct, const_tokens)
+      for struct in self.flagged_structs:
+          extract_constants(struct, const_tokens)
+      # Compose and output the value strings
+      f.write('#---------------------------------------\n')
+      f.write('# Necessary constants imported from\n')
+      f.write('# header files.\n')
+      f.write('#---------------------------------------\n')
+      for token in const_tokens:            
+          value = find_macro_val(token, self.include_dirs)
+          f.write(token + ' = ' +str(value)+'\n')
+      f.write('\n')
+
+
+      # Define all unflagged structures first in the file.
+      f.write('#---------------------------------------\n')
+      f.write('# Data type structures, used to compose\n')
+      f.write('# various communication data structures.\n')
+      f.write('#---------------------------------------\n')
+      for struct in self.unflagged_structs:
+          write_struct_code(struct, False)
+
+
+      # Then do flagged structs, some of which depend on the definitions
+      # of an unflagged structure.
+      f.write('#---------------------------------------\n')
+      f.write('# Communication data structure class\n')
+      f.write('# definitions.\n')
+      f.write('#---------------------------------------\n')
+      for struct in self.flagged_structs:
+          extract_constants(struct, const_tokens)
+          write_struct_code(struct, True)
+
+      if self.inst_type == 'CBI':
+          f.write('class instrument(instrument_base):\n')
+          f.write('    """Provides for instantiation of all core\n')
+          f.write('    instrumentation communication structures."""\n')
+          f.write('    def __init__(self, host):\n')
+          f.write('        instrument_base.__init__(self)\n')
+          f.write('        self.hostname = host\n')
+          f.write('        self.hostname_b = str.encode(host)\n\n')
+      else:
+          f.write('class BPM(instrument):\n')
+          f.write('    """Defines a BPM instrument.\n\n')
+          f.write('    Contains core and BPM-specific communication data structures."""\n')
+          f.write('    def __init__(self, host):\n')
+          f.write('        instrument.__init__(self, host)\n')
+          
+      for struct in self.flagged_structs:
+          if struct.multi_num != 0:
+              attribname = lower(struct.short_multiname)
+              classname = struct.short_multiname
+          else:
+              attribname = lower(struct.shortname)
+              classname = struct.shortname
+
+          f.write('        self.'+attribname+' = '+classname + \
+                  '(self.socketfd)\n')
+
+
+
+#-------------------------------------------------------------------
+
+for arg in sys.argv:
+    if arg[-4:] == '.def':
+        def_filename = arg
+
+
+p = Parser( def_filename )
+
+p.process_header()
+
+p.process_defs()
+
+p.struct_code()
+
+p.calculate_structure_values()
+
+p.write_config_file()
+
+# Must be run before write_python3_file.
+# It generates structure tag numbers.
+p.write_tags_file()
+
+p.write_init_file()
+
+p.write_multistruct_accessor()
+
+p.write_declarations()
+
+p.write_packet_tables()
+
+p.write_dump_routines()
+
+p.write_python3_file()

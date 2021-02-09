@@ -1,0 +1,7 @@
+#!/bin/bash
+
+./cl
+./cbpm_comgen ../BeamInstSupport/BIP_input/cbi_core_communication_structs.def
+
+./install_cbi_core_structs
+echo "installed cbi_structs"

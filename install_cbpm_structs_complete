@@ -1,0 +1,7 @@
+#!/bin/bash
+
+./cl
+./cbpm_comgen ../CBPM-TSHARC/BIP_input/cbpm_communication_structs.def
+
+./install_cbpm_structs
+echo "installed cbpm_structs"

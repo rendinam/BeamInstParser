@@ -1,0 +1,28 @@
+#!/bin/bash
+#
+# Simple script to install the products of a BIParser run on the
+# CBPM_II (CBPM-TSHARC) input definition file into the 
+# appropriate library directory tree.
+#
+# This assumes the output files are all generated in the
+# checked-out BeamInstParser directory and that this directory
+# lives at a level parallel to the CBPM-TSHARC directory.
+#------------------------------------------------------------------
+
+mv    *dump*      ../CBPM-TSHARC/commstruct_output
+mv -f *buffer*    ../CBPM-TSHARC/comm_code
+
+mv -f *_convert*  ../CBPM-TSHARC/type_convert
+
+mv -f *config*    ../CBPM-TSHARC/comm_include
+mv -f *tags*      ../CBPM-TSHARC/comm_include
+mv -f *types*     ../CBPM-TSHARC/comm_include
+
+mv -f *init*      ../CBPM-TSHARC/comm_code
+
+mv -f *commstru*  ../CBPM-TSHARC/include
+mv -f *protos*    ../CBPM-TSHARC/include
+
+mv -f *tables*    ../CBPM-TSHARC/instrument_code
+
+
